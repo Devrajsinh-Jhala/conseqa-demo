@@ -1,0 +1,38 @@
+{
+  "packageName": "@conseqa/example-postgres-outcomes",
+  "packageVersion": "0.1.0",
+  "runtimeTarget": "node22",
+  "sourceCommit": "postgres-live-demo",
+  "clientEntry": "contracts/client.ts",
+  "runnerEntry": "contracts/runner.ts",
+  "regressions": "contracts/regressions.json",
+  "outputDirectory": "dist/conseqa",
+  "contracts": [
+    {
+      "name": "store.credit.issued",
+      "version": 1,
+      "operation": "store_credit.insert",
+      "intentSchema": "contracts/schemas/credit-intent.json",
+      "bindingSchema": "contracts/schemas/credit-binding.json",
+      "observationSchema": "contracts/schemas/credit-observation.json",
+      "clientExport": "storeCreditIssuedClient",
+      "runnerExport": "storeCreditIssuedRunner",
+      "schedule": {
+        "initialDelayMs": 300,
+        "baseIntervalMs": 1000,
+        "maxIntervalMs": 15000,
+        "deadlineMs": 300000
+      },
+      "supportsDiscovery": true,
+      "evidenceAllowlist": [
+        "/id",
+        "/customer_id",
+        "/amount_minor",
+        "/currency",
+        "/status",
+        "/created_at"
+      ],
+      "redaction": { "drop": [], "hash": [] }
+    }
+  ]
+}

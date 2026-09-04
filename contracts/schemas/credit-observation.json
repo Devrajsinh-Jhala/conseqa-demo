@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.conseqa.example/demo/credit-observation-v1.json",
+  "title": "Store credit observation",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["id", "customer_id", "amount_minor", "currency", "status"],
+  "properties": {
+    "id": { "type": "string" },
+    "customer_id": { "type": "string" },
+    "amount_minor": { "type": "integer" },
+    "currency": { "type": "string" },
+    "status": { "type": "string" },
+    "correlation_key": { "type": "string" },
+    "created_at": {}
+  }
+}

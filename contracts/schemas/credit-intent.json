@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.conseqa.example/demo/credit-intent-v1.json",
+  "title": "Store credit intent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["customerId", "amountMinor", "currency"],
+  "properties": {
+    "customerId": { "type": "string", "minLength": 1 },
+    "amountMinor": { "type": "integer", "minimum": 1 },
+    "currency": { "type": "string", "pattern": "^[A-Z]{3}$" }
+  }
+}
