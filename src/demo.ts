@@ -1,8 +1,8 @@
 /**
  * Conseqa against a real PostgreSQL database, over the real network.
  *
- * An agent issues a store credit. The INSERT reaches the database and commits.
- * The reply never gets back, so the agent is left holding an error and no
+ * A scripted action issues synthetic store credit. The INSERT may commit.
+ * The proxy drops the reply, so the agent is left holding an error and no
  * credit id, with no way to say whether the customer was paid. Retrying might
  * pay them twice; giving up might strand them. Both are guesses.
  *
@@ -12,7 +12,8 @@
  * The lost reply is not faked in the client library. The agent's connection
  * runs through a local TCP proxy that forwards the statement upstream and then
  * drops the response and destroys the socket, which is what a network does when
- * it fails at the worst possible moment.
+ * it fails at the worst possible moment. Only the later read establishes
+ * whether the write actually committed.
  *
  *   npm install && npm run demo
  */
@@ -23,7 +24,11 @@ import path from "node:path";
 import process from "node:process";
 import { createRunnerApp, type RunnerConfig } from "@conseqa/runner";
 import { Conseqa, loadClientContractPackage } from "@conseqa/sdk";
-import type { ContractManifest, JsonObject, OutcomeContract } from "@conseqa/contracts";
+import type {
+  ContractManifest,
+  JsonObject,
+  OutcomeContract,
+} from "@conseqa/contracts";
 import pg from "pg";
 
 // The runner logs every sidecar request at info level. Correct in production,
@@ -71,8 +76,8 @@ async function loadEnvironment(): Promise<void> {
 
 /**
  * Forwards the agent's connection upstream byte for byte. Once armed, the next
- * thing the database sends is dropped and both sockets are destroyed: the
- * statement has already executed and committed, and the agent learns nothing.
+ * thing the database sends is dropped and both sockets are destroyed. Opaque
+ * bytes cannot establish whether the transaction committed; discovery does.
  *
  * TLS runs end to end between the agent and the database, so this proxy cannot
  * read a single byte of what it carries. It is only allowed to lose it.
@@ -80,9 +85,14 @@ async function loadEnvironment(): Promise<void> {
 function startLossyProxy(upstreamHost: string, upstreamPort: number) {
   let armed = false;
   let dropped = false;
+  const sockets = new Set<net.Socket>();
 
   const server = net.createServer((client) => {
     const upstream = net.connect(upstreamPort, upstreamHost);
+    for (const socket of [client, upstream]) {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+    }
     const teardown = () => {
       client.destroy();
       upstream.destroy();
@@ -105,8 +115,11 @@ function startLossyProxy(upstreamHost: string, upstreamPort: number) {
 
   return {
     listen: () =>
-      new Promise<number>((resolve) => {
-        server.listen(0, LOOPBACK, () => resolve((server.address() as net.AddressInfo).port));
+      new Promise<number>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, LOOPBACK, () =>
+          resolve((server.address() as net.AddressInfo).port),
+        );
       }),
     arm: () => {
       armed = true;
@@ -114,7 +127,10 @@ function startLossyProxy(upstreamHost: string, upstreamPort: number) {
     get didDrop() {
       return dropped;
     },
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () => {
+      for (const socket of sockets) socket.destroy();
+      return new Promise<void>((resolve) => server.close(() => resolve()));
+    },
   };
 }
 
@@ -124,7 +140,12 @@ interface StoredIntentResponse {
     actionState: string;
     outcomeState: string;
     binding: JsonObject | null;
-    checks: readonly { id: string; passed: boolean; expected?: unknown; observed?: unknown }[];
+    checks: readonly {
+      id: string;
+      passed: boolean;
+      expected?: unknown;
+      observed?: unknown;
+    }[];
   };
 }
 
@@ -142,7 +163,10 @@ async function builtArtifactPayload(directory: string) {
     await Promise.all(
       [...fileNames].map(
         async (name) =>
-          [name, (await readFile(path.join(directory, name))).toString("base64")] as const,
+          [
+            name,
+            (await readFile(path.join(directory, name))).toString("base64"),
+          ] as const,
       ),
     ),
   );
@@ -158,32 +182,44 @@ async function restoreWritePermissions(directory: string): Promise<void> {
   }
 }
 
-async function waitForTerminal(origin: string, intentId: string) {
-  const deadline = Date.now() + 40_000;
+async function waitForTerminal(
+  origin: string,
+  intentId: string,
+  timeoutMs: number,
+) {
+  const deadline = Date.now() + timeoutMs;
   let seen = "";
   while (Date.now() < deadline) {
-    const response = await fetch(`${origin}/v1/intents/${encodeURIComponent(intentId)}`, {
-      headers: { authorization: `Bearer ${SIDECAR_TOKEN}` },
-    });
-    if (!response.ok) throw new Error(`Runner intent lookup failed with ${response.status}`);
+    const response = await fetch(
+      `${origin}/v1/intents/${encodeURIComponent(intentId)}`,
+      {
+        signal: AbortSignal.timeout(
+          Math.max(1, Math.min(5_000, deadline - Date.now())),
+        ),
+        headers: { authorization: `Bearer ${SIDECAR_TOKEN}` },
+      },
+    );
+    if (!response.ok)
+      throw new Error(`Runner intent lookup failed with ${response.status}`);
     const intent = (await response.json()) as StoredIntentResponse;
     if (intent.lifecycle.outcomeState !== seen) {
       if (intent.lifecycle.outcomeState === "DISCOVERING") {
-        info("runner is searching the database for the row the agent never saw");
+        info(
+          "runner is searching the database for the row the agent never saw",
+        );
       }
       seen = intent.lifecycle.outcomeState;
     }
     if (
-      ["SATISFIED", "VIOLATED", "INCONCLUSIVE", "TIMED_OUT"].includes(intent.lifecycle.outcomeState)
+      ["SATISFIED", "VIOLATED", "INCONCLUSIVE", "TIMED_OUT"].includes(
+        intent.lifecycle.outcomeState,
+      )
     ) {
       return intent;
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  throw new Error(
-    "The runner did not reach a terminal outcome in 40s. Discovery retries until its own " +
-      "deadline, so this usually means the row never committed.",
-  );
+  return null;
 }
 
 function exitWithSetupHelp(): never {
@@ -216,8 +252,20 @@ async function main(): Promise<void> {
   const readUrl = process.env.DATABASE_READ_URL?.trim() || writeUrl;
   process.env.CONSEQA_DEMO_READ_URL = readUrl;
 
-  const parsed = new URL(writeUrl);
-  if (!parsed.hostname.includes("neon.tech")) {
+  let parsed: URL;
+  try {
+    parsed = new URL(writeUrl);
+  } catch {
+    console.error(
+      "DATABASE_URL is not a valid connection URL; its value has not been logged.",
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (
+    !["postgres:", "postgresql:"].includes(parsed.protocol) ||
+    !parsed.hostname.endsWith(".neon.tech")
+  ) {
     console.error(
       [
         "",
@@ -236,7 +284,14 @@ async function main(): Promise<void> {
   }
 
   step("1. Prepare a table to write to");
-  const setupPool = new pg.Pool({ connectionString: writeUrl, max: 2 });
+  const setupPool = new pg.Pool({
+    connectionString: writeUrl,
+    max: 2,
+    connectionTimeoutMillis: 10_000,
+    query_timeout: 10_000,
+    statement_timeout: 10_000,
+  });
+  setupPool.on("error", () => {});
   // A role that can already use the table does not need to create it. Roles
   // scoped tightly enough to be worth verifying often cannot create anything,
   // which is the point of the product and should not block its own demo.
@@ -286,10 +341,16 @@ async function main(): Promise<void> {
   }
 
   if (readUrl === writeUrl) {
-    info("verifier is using the same role as the agent, because DATABASE_READ_URL is unset");
-    info("in production it would hold SELECT and nothing else - see the README");
+    info(
+      "verifier is using the same role as the agent, because DATABASE_READ_URL is unset",
+    );
+    info(
+      "in production it would hold SELECT and nothing else - see the README",
+    );
   } else {
-    ok("verifier is using a separate read-only role");
+    info(
+      "verifier is using a separate connection string; its role permissions are not verified",
+    );
   }
 
   const proxy = startLossyProxy(parsed.hostname, Number(parsed.port || 5432));
@@ -316,8 +377,8 @@ async function main(): Promise<void> {
     heartbeatIntervalMs: 30_000,
     runtimeInstanceTtlMs: 90_000,
   };
-  const runner = await createRunnerApp(config);
-  let runnerStarted = false;
+  let runner: Awaited<ReturnType<typeof createRunnerApp>> | undefined;
+  let verified = false;
   let conseqa: Conseqa | undefined;
   const agent = new pg.Client({
     host: LOOPBACK,
@@ -325,6 +386,9 @@ async function main(): Promise<void> {
     user: parsed.username,
     password: decodeURIComponent(parsed.password),
     database: parsed.pathname.slice(1),
+    connectionTimeoutMillis: 10_000,
+    query_timeout: 10_000,
+    statement_timeout: 10_000,
     // TLS still terminates at the database: the proxy carries opaque bytes.
     ssl: { servername: parsed.hostname },
   });
@@ -334,29 +398,52 @@ async function main(): Promise<void> {
 
   try {
     step("2. Start the private runner");
+    runner = await createRunnerApp(config);
     const origin = await runner.app.listen({ host: LOOPBACK, port: 0 });
-    runnerStarted = true;
     ok(`runner on ${origin} ${dim("(loopback only)")}`);
 
-    const packageDirectory = path.resolve(import.meta.dirname, "..", "dist", "conseqa");
+    const packageDirectory = path.resolve(
+      import.meta.dirname,
+      "..",
+      "dist",
+      "conseqa",
+    );
     const artifact = await builtArtifactPayload(packageDirectory);
+    const schedule = artifact.manifest.contracts.find(
+      (entry) => entry.name === "store.credit.issued" && entry.version === 1,
+    )?.verification;
+    if (!schedule)
+      throw new Error("The built package is missing the store-credit schedule");
+    // Allow the contract deadline, one in-flight probe, and scheduler slack.
+    // Deriving this from the installed manifest keeps the CLI and runner aligned.
+    const verificationWaitMs =
+      schedule.deadlineMs + config.verifierTimeoutMs + 5_000;
     const install = await fetch(`${origin}/v1/contracts/install`, {
       method: "POST",
-      headers: { authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" },
+      signal: AbortSignal.timeout(15_000),
+      headers: {
+        authorization: `Bearer ${ADMIN_TOKEN}`,
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ artifact: { ...artifact, encoding: "base64" } }),
     });
-    if (!install.ok) throw new Error(`Contract installation failed: ${await install.text()}`);
+    if (!install.ok)
+      throw new Error(`Contract installation failed: ${await install.text()}`);
     const installed = (await install.json()) as {
       buildHash: string;
       runtime?: readonly { loaded?: boolean; error?: string }[];
     };
     const runtime = installed.runtime?.[0];
     if (!runtime?.loaded) {
-      throw new Error(`Runner runtime did not load: ${runtime?.error ?? "unknown"}`);
+      throw new Error(
+        `Runner runtime did not load: ${runtime?.error ?? "unknown"}`,
+      );
     }
     ok(`contract installed · build ${installed.buildHash.slice(0, 12)}`);
 
-    const registry = await loadClientContractPackage({ directory: packageDirectory });
+    const registry = await loadClientContractPackage({
+      directory: packageDirectory,
+    });
     const contract = registry.get("store.credit.issued", 1) as OutcomeContract<
       JsonObject,
       JsonObject,
@@ -376,14 +463,20 @@ async function main(): Promise<void> {
       await conseqa.protect(contract, {
         actionKey: `store_credit_${CUSTOMER_ID}_${Date.now()}`,
         protectionMode: "required",
-        intent: { customerId: CUSTOMER_ID, amountMinor: AMOUNT_MINOR, currency: CURRENCY },
+        intent: {
+          customerId: CUSTOMER_ID,
+          amountMinor: AMOUNT_MINOR,
+          currency: CURRENCY,
+        },
         async execute({ providerCorrelationKey }) {
           key = providerCorrelationKey;
-          ok(`intent recorded before the statement ${dim("— durable, on disk")}`);
+          ok(
+            `intent recorded before the statement ${dim("— durable, on disk")}`,
+          );
           ok(`correlation key ${bold(providerCorrelationKey)}`);
           info(`INSERT INTO ${TABLE} … → ${parsed.hostname}`);
-          // From here the network is hostile: the database will commit, and the
-          // proxy will destroy the reply.
+          // From here the network is hostile: the proxy destroys the next
+          // response. A later read must establish whether the write committed.
           proxy.arm();
           const result = await agent.query<{ id: string }>(
             `insert into ${TABLE} (customer_id, amount_minor, currency, correlation_key)
@@ -397,34 +490,71 @@ async function main(): Promise<void> {
       agentError = error;
     }
     if (agentError === undefined) {
-      throw new Error("The reply was not lost — the demo did not exercise its own premise");
+      throw new Error(
+        "The reply was not lost — the demo did not exercise its own premise",
+      );
     }
-    if (!proxy.didDrop) warn("the proxy never dropped a packet; the failure came from elsewhere");
-    warn(`${(agentError as Error).message} — the agent has an error and no credit id`);
-    warn("was the customer paid? The agent cannot tell. Retrying might pay them twice.");
+    if (!proxy.didDrop)
+      warn("the proxy never dropped a packet; the failure came from elsewhere");
+    warn(
+      `${(agentError as Error).message} — the agent has an error and no credit id`,
+    );
+    warn(
+      "was the synthetic credit recorded? The agent cannot tell. Retrying might duplicate it.",
+    );
 
     step("4. The runner asks the database");
     const list = await fetch(`${origin}/v1/intents?limit=1`, {
+      signal: AbortSignal.timeout(5_000),
       headers: { authorization: `Bearer ${SIDECAR_TOKEN}` },
     });
+    if (!list.ok)
+      throw new Error(`Runner intent listing failed with ${list.status}`);
     const intents = (await list.json()) as { items: StoredIntentResponse[] };
     const registered = intents.items[0];
-    if (!registered) throw new Error("Runner did not durably register the intent");
-    info(`SELECT id FROM store_credits WHERE correlation_key = '${key}' ${dim("(read-only)")}`);
-    const settled = await waitForTerminal(origin, registered.registration.intentId);
+    if (!registered)
+      throw new Error("Runner did not durably register the intent");
+    info(
+      `SELECT id FROM store_credits WHERE correlation_key = '${key}' ${dim("(read-only)")}`,
+    );
+    const settled = await waitForTerminal(
+      origin,
+      registered.registration.intentId,
+      verificationWaitMs,
+    );
 
     step("5. Verdict");
-    const binding = settled.lifecycle.binding as { creditId?: string; recovered?: boolean } | null;
+    if (!settled) {
+      warn(
+        "Demo interrupted — verification did not finish within the bounded wait; no terminal verdict is available",
+      );
+      info(
+        "This does not prove that the write failed or that it is safe to retry.",
+      );
+      info(`Check the row by correlation key: ${key}`);
+      process.exitCode = 1;
+      return;
+    }
+    const binding = settled.lifecycle.binding as {
+      creditId?: string;
+      recovered?: boolean;
+    } | null;
     console.log(`  action    ${bold(settled.lifecycle.actionState)}`);
     console.log(`  outcome   ${bold(settled.lifecycle.outcomeState)}`);
     if (binding?.creditId) {
-      console.log(`  credit    ${bold(binding.creditId)} ${dim(`recovered=${binding.recovered}`)}`);
+      console.log(
+        `  credit    ${bold(binding.creditId)} ${dim(`recovered=${binding.recovered}`)}`,
+      );
     }
     const passed = settled.lifecycle.checks.filter((c) => c.passed).length;
-    console.log(`  checks    ${passed} of ${settled.lifecycle.checks.length} passed`);
+    console.log(
+      `  checks    ${passed} of ${settled.lifecycle.checks.length} passed`,
+    );
     for (const check of settled.lifecycle.checks) {
       const mark = check.passed ? green("✓") : amber("✕");
-      console.log(`    ${mark} ${check.id} ${dim(String(check.observed ?? ""))}`);
+      console.log(
+        `    ${mark} ${check.id} ${dim(String(check.observed ?? ""))}`,
+      );
     }
 
     if (settled.lifecycle.outcomeState === "SATISFIED" && binding?.creditId) {
@@ -445,19 +575,37 @@ async function main(): Promise<void> {
           "",
         ].join("\n"),
       );
+      verified = true;
     } else {
-      console.log(
-        `\n  ${amber("Not SATISFIED.")} That is a real reading of your database, not a broken demo.\n`,
-      );
+      if (settled.lifecycle.outcomeState === "INCONCLUSIVE") {
+        warn(
+          "Unknown — available evidence could not establish the intended outcome.",
+        );
+        info(
+          "Missing evidence does not prove non-execution or make retrying safe.",
+        );
+      } else {
+        info(
+          "The stored outcome and checks above explain why this action was not verified.",
+        );
+      }
+      process.exitCode = 1;
     }
   } finally {
+    await proxy.close().catch(() => {});
     await agent.end().catch(() => {});
     await conseqa?.close();
-    if (runnerStarted) await runner.app.close();
-    await proxy.close().catch(() => {});
+    await runner?.app.close().catch(() => {});
     await setupPool.end().catch(() => {});
-    await restoreWritePermissions(contractsDirectory).catch(() => {});
-    await rm(scratch, { recursive: true, force: true }).catch(() => {});
+    if (verified) {
+      await restoreWritePermissions(contractsDirectory).catch(() => {});
+      await rm(scratch, { recursive: true, force: true }).catch(() => {});
+    } else {
+      info(`Local evidence retained at ${scratch}`);
+      info(
+        "The runner has stopped. Its SQLite history can be inspected; no automatic retry is scheduled.",
+      );
+    }
   }
 }
 

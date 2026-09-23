@@ -5,7 +5,11 @@
   "type": "module",
   "description": "A 15-second demo: an agent writes to a real database, the reply is lost, and Conseqa recovers the truth without retrying.",
   "scripts": {
+    "typecheck": "tsc --noEmit",
     "contracts:build": "conseqa contracts build --directory .",
+    "contracts:test": "conseqa contracts test --directory .",
+    "test:callbacks": "tsx --test contracts/runner.test.ts",
+    "test": "npm run typecheck && npm run test:callbacks && npm run contracts:build && npm run contracts:test",
     "demo": "npm run contracts:build && tsx src/demo.ts"
   },
   "dependencies": {

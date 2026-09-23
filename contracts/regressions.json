@@ -1,1 +1,201 @@
-{ "schemaVersion": 1, "defaults": {}, "cases": [] }
+{
+  "schemaVersion": 1,
+  "defaults": {
+    "actionKey": "credit_demo_1",
+    "operation": "store_credit.insert",
+    "protectionMode": "required",
+    "protectionLevel": "FULL",
+    "providerCorrelationKey": "cq_demo_1",
+    "intent": {
+      "customerId": "cus_demo_8042",
+      "amountMinor": 2499,
+      "currency": "USD"
+    },
+    "registeredAt": "2026-09-01T00:00:00.000Z",
+    "deadlineAt": "2026-09-01T00:00:20.000Z"
+  },
+  "cases": [
+    {
+      "name": "Lost response recovers exactly one correlated row",
+      "contract": "store.credit.issued",
+      "contractVersion": 1,
+      "expected": "CONFIRMED_EXECUTED",
+      "assertion": {
+        "kind": "exact-candidate-discovery",
+        "criteria": [
+          { "pointer": "/correlation_key", "expected": "cq_demo_1" }
+        ],
+        "candidates": [
+          { "id": "credit_1", "correlation_key": "cq_demo_1" },
+          { "id": "credit_other", "correlation_key": "cq_other" }
+        ]
+      }
+    },
+    {
+      "name": "No matching evidence remains inconclusive",
+      "contract": "store.credit.issued",
+      "contractVersion": 1,
+      "expected": "INCONCLUSIVE",
+      "assertion": {
+        "kind": "exact-candidate-discovery",
+        "criteria": [
+          { "pointer": "/correlation_key", "expected": "cq_demo_1" }
+        ],
+        "candidates": []
+      }
+    },
+    {
+      "name": "Multiple exact matches never auto-bind",
+      "contract": "store.credit.issued",
+      "contractVersion": 1,
+      "expected": "INCONCLUSIVE",
+      "assertion": {
+        "kind": "exact-candidate-discovery",
+        "criteria": [
+          { "pointer": "/correlation_key", "expected": "cq_demo_1" }
+        ],
+        "candidates": [
+          { "id": "credit_1", "correlation_key": "cq_demo_1" },
+          { "id": "credit_2", "correlation_key": "cq_demo_1" }
+        ]
+      }
+    },
+    {
+      "name": "Expected credit fields pass stored-observation checks",
+      "contract": "store.credit.issued",
+      "contractVersion": 1,
+      "expected": "SATISFIED",
+      "assertion": {
+        "kind": "predicates",
+        "observation": {
+          "customer_id": "cus_demo_8042",
+          "amount_minor": 2499,
+          "currency": "USD",
+          "status": "issued",
+          "correlation_key": "cq_demo_1"
+        },
+        "predicates": [
+          {
+            "id": "customer",
+            "pointer": "/customer_id",
+            "operator": "equals",
+            "expected": "cus_demo_8042"
+          },
+          {
+            "id": "amount",
+            "pointer": "/amount_minor",
+            "operator": "equals",
+            "expected": 2499
+          },
+          {
+            "id": "currency",
+            "pointer": "/currency",
+            "operator": "equals",
+            "expected": "USD"
+          },
+          {
+            "id": "status",
+            "pointer": "/status",
+            "operator": "equals",
+            "expected": "issued"
+          },
+          {
+            "id": "correlation",
+            "pointer": "/correlation_key",
+            "operator": "equals",
+            "expected": "cq_demo_1"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Changed amount fails the stored amount predicate",
+      "contract": "store.credit.issued",
+      "contractVersion": 1,
+      "expected": "VIOLATED",
+      "assertion": {
+        "kind": "predicates",
+        "observation": { "amount_minor": 2500 },
+        "predicates": [
+          {
+            "id": "amount",
+            "pointer": "/amount_minor",
+            "operator": "equals",
+            "expected": 2499
+          }
+        ]
+      }
+    },
+    {
+      "name": "Authentication error cannot establish a failed action",
+      "contract": "store.credit.issued",
+      "contractVersion": 1,
+      "expected": "INCONCLUSIVE",
+      "assertion": {
+        "kind": "probe-error",
+        "category": "authentication",
+        "retryable": false
+      }
+    },
+    {
+      "name": "Terminal missing evidence folds to an unknown outcome",
+      "contract": "store.credit.issued",
+      "contractVersion": 1,
+      "expected": "INCONCLUSIVE",
+      "assertion": {
+        "kind": "lifecycle",
+        "select": "outcomeState",
+        "events": [
+          { "type": "dispatch.authorized" },
+          {
+            "type": "action.exception",
+            "classification": { "certainty": "ambiguous", "retryable": false }
+          },
+          { "type": "discovery.started" },
+          {
+            "type": "discovery.result",
+            "result": "not_found",
+            "terminal": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "Known pending entity is overdue beyond its deadline",
+      "contract": "store.credit.issued",
+      "contractVersion": 1,
+      "expected": "TIMED_OUT",
+      "assertion": {
+        "kind": "deadline",
+        "entityKnown": true,
+        "currentOutcome": "PENDING",
+        "deadlineAt": "2026-09-01T00:00:20.000Z",
+        "evaluatedAt": "2026-09-01T00:00:21.000Z"
+      }
+    },
+    {
+      "name": "Same action key with changed amount is rejected",
+      "contract": "store.credit.issued",
+      "contractVersion": 1,
+      "expected": "CONFLICT",
+      "assertion": {
+        "kind": "action-identity",
+        "first": {
+          "actionKey": "credit_demo_1",
+          "intent": { "amountMinor": 2499 }
+        },
+        "retry": {
+          "actionKey": "credit_demo_1",
+          "intent": { "amountMinor": 2500 }
+        }
+      }
+    },
+    {
+      "name": "Runner bundle tampering is rejected",
+      "contract": "store.credit.issued",
+      "contractVersion": 1,
+      "expected": "REJECTED",
+      "assertion": { "kind": "artifact-integrity", "mutate": "runner-bundle" }
+    }
+  ]
+}

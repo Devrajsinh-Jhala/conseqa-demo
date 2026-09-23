@@ -20,8 +20,8 @@
       "schedule": {
         "initialDelayMs": 300,
         "baseIntervalMs": 1000,
-        "maxIntervalMs": 15000,
-        "deadlineMs": 300000
+        "maxIntervalMs": 2000,
+        "deadlineMs": 20000
       },
       "supportsDiscovery": true,
       "evidenceAllowlist": [
