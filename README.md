@@ -114,9 +114,9 @@ do not prove that the role is read-only, and the demo does not audit its grants.
 
 ## Honest limits
 
-- **The read path needs Neon.** This example uses SQL-over-HTTP to work with the
-  published 0.1.0 contract bundler. It is not a test of every PostgreSQL hosting
-  provider or of the generic PostgreSQL connector.
+- **The read path needs Neon.** This example verifies through Neon's SQL-over-HTTP.
+  It is not a test of every PostgreSQL hosting provider or of the generic
+  PostgreSQL connector.
 - **`DATABASE_URL` needs to create one table** the first time, namespaced under
   `conseqa_demo`. If the role cannot, the demo prints the SQL to run as owner
   and exits.
