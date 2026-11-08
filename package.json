@@ -13,15 +13,15 @@
     "demo": "npm run contracts:build && tsx src/demo.ts"
   },
   "dependencies": {
-    "@conseqa/contracts": "^0.1.10",
-    "@conseqa/runner": "^0.1.10",
-    "@conseqa/sdk": "^0.1.10",
-    "@conseqa/verifiers": "^0.1.10",
+    "@conseqa/contracts": "^0.1.12",
+    "@conseqa/runner": "^0.1.12",
+    "@conseqa/sdk": "^0.1.12",
+    "@conseqa/verifiers": "^0.1.12",
     "@neondatabase/serverless": "^1.0.2",
     "pg": "^8.16.3"
   },
   "devDependencies": {
-    "@conseqa/cli": "^0.1.10",
+    "@conseqa/cli": "^0.1.12",
     "@types/node": "^22.10.0",
     "@types/pg": "^8.15.5",
     "tsx": "^4.20.3",
@@ -29,8 +29,5 @@
   },
   "engines": {
     "node": ">=22.13"
-  },
-  "overrides": {
-    "ajv": "^8.18.0"
   }
 }
